@@ -1,9 +1,16 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { TrendingUp, TrendingDown, DollarSign } from 'lucide-react'
+import { TrendingUp, TrendingDown } from 'lucide-react'
 
 const CHONKY_TOKEN = process.env.NEXT_PUBLIC_CHONKY_TOKEN!
+
+interface DexScreenerPair {
+  priceUsd: string
+  priceChange: {
+    h24: number
+  }
+}
 
 export function PriceWidget() {
   const [price, setPrice] = useState<number | null>(null)
@@ -19,18 +26,14 @@ export function PriceWidget() {
   async function fetchPrice() {
     try {
       const response = await fetch(
-        `https://public-api.birdeye.so/public/price?address=${CHONKY_TOKEN}`,
-        {
-          headers: {
-            'X-API-KEY': 'public' // Free tier
-          }
-        }
+        `https://api.dexscreener.com/latest/dex/tokens/${CHONKY_TOKEN}`
       )
       const data = await response.json()
       
-      if (data.data) {
-        setPrice(data.data.value)
-        setChange24h(data.data.priceChange24h || 0)
+      if (data.pairs && data.pairs.length > 0) {
+        const pair = data.pairs[0] as DexScreenerPair
+        setPrice(parseFloat(pair.priceUsd))
+        setChange24h(pair.priceChange?.h24 || 0)
       }
     } catch (error) {
       console.error('Error fetching price:', error)
@@ -68,7 +71,7 @@ export function PriceWidget() {
         </div>
 
         <div className="flex gap-2">
-          <a
+          
             href={`https://dexscreener.com/solana/${CHONKY_TOKEN}`}
             target="_blank"
             rel="noopener noreferrer"
@@ -76,7 +79,7 @@ export function PriceWidget() {
           >
             CHART
           </a>
-          <a
+          
             href={`https://jup.ag/swap/SOL-${CHONKY_TOKEN}`}
             target="_blank"
             rel="noopener noreferrer"
