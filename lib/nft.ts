@@ -1,6 +1,6 @@
 import { Connection, PublicKey } from '@solana/web3.js'
 
-const COLLECTION_HASH = '2877987dc7db186f0349737e7d26415ddadff5faa01cddec5962a342b51dc11c'
+const COLLECTION_ADDRESS = process.env.NEXT_PUBLIC_COLLECTION_ADDRESS!
 const RPC_ENDPOINT = 'https://api.mainnet-beta.solana.com'
 
 export interface NFTData {
@@ -11,13 +11,15 @@ export interface NFTData {
 
 export async function verifyNFTOwnership(walletAddress: string): Promise<NFTData | null> {
   try {
-    const connection = new Connection(RPC_ENDPOINT)
+    const connection = new Connection(RPC_ENDPOINT, 'confirmed')
     const publicKey = new PublicKey(walletAddress)
     
     // Get all token accounts
     const tokenAccounts = await connection.getParsedTokenAccountsByOwner(publicKey, {
       programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
     })
+
+    console.log(`Found ${tokenAccounts.value.length} token accounts`)
 
     // Check each token for NFT (amount = 1, decimals = 0)
     for (const { account } of tokenAccounts.value) {
@@ -26,16 +28,19 @@ export async function verifyNFTOwnership(walletAddress: string): Promise<NFTData
       
       if (amount === 1 && parsedInfo.tokenAmount.decimals === 0) {
         const mintAddress = parsedInfo.mint
+        console.log(`Checking NFT: ${mintAddress}`)
         
         // Fetch metadata
         const nftData = await fetchNFTMetadata(connection, mintAddress)
         
         if (nftData) {
+          console.log('Found matching NFT!', nftData)
           return nftData
         }
       }
     }
     
+    console.log('No matching NFT found')
     return null
   } catch (error) {
     console.error('Error verifying NFT ownership:', error)
@@ -49,20 +54,27 @@ async function fetchNFTMetadata(connection: Connection, mintAddress: string) {
     const metadataPDA = await getMetadataPDA(mintPubkey)
     const accountInfo = await connection.getAccountInfo(metadataPDA)
     
-    if (!accountInfo) return null
+    if (!accountInfo) {
+      console.log('No metadata account found')
+      return null
+    }
     
     const metadata = parseMetadata(accountInfo.data)
-    if (!metadata.uri) return null
+    console.log('Parsed metadata:', metadata)
     
-    // Fetch JSON from URI
-    const response = await fetch(metadata.uri)
-    const json = await response.json()
+    if (!metadata.uri) {
+      console.log('No URI in metadata')
+      return null
+    }
     
-    // Check if this NFT matches our collection by checking the URI or metadata
-    const uriLower = metadata.uri.toLowerCase()
-    if (uriLower.includes(COLLECTION_HASH.toLowerCase()) || 
-        uriLower.includes('obese') ||
-        json.collection?.name?.includes('OBESE MAXI BIZ')) {
+    // Check collection
+    if (metadata.collection?.key === COLLECTION_ADDRESS && metadata.collection?.verified) {
+      console.log('Collection verified! Fetching JSON...')
+      
+      // Fetch JSON from Arweave
+      const response = await fetch(metadata.uri)
+      const json = await response.json()
+      
       return {
         mint: mintAddress,
         name: json.name || metadata.name,
@@ -72,14 +84,14 @@ async function fetchNFTMetadata(connection: Connection, mintAddress: string) {
     
     return null
   } catch (error) {
-    console.error('Error fetching metadata:', error)
+    console.error('Error fetching metadata for', mintAddress, error)
     return null
   }
 }
 
 async function getMetadataPDA(mint: PublicKey): Promise<PublicKey> {
   const METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s')
-  const [publicKey] = await PublicKey.findProgramAddress(
+  const [publicKey] = PublicKey.findProgramAddressSync(
     [
       Buffer.from('metadata'),
       METADATA_PROGRAM_ID.toBuffer(),
@@ -91,20 +103,70 @@ async function getMetadataPDA(mint: PublicKey): Promise<PublicKey> {
 }
 
 function parseMetadata(data: Buffer) {
-  let offset = 1 + 32 + 32
-  
-  const nameLength = data.readUInt32LE(offset)
-  offset += 4
-  const name = data.slice(offset, offset + nameLength).toString('utf-8').replace(/\0/g, '')
-  offset += nameLength
-  
-  const symbolLength = data.readUInt32LE(offset)
-  offset += 4
-  offset += symbolLength
-  
-  const uriLength = data.readUInt32LE(offset)
-  offset += 4
-  const uri = data.slice(offset, offset + uriLength).toString('utf-8').replace(/\0/g, '')
-  
-  return { name, uri }
+  try {
+    let offset = 1 + 32 + 32 // key + update authority + mint
+    
+    // Name
+    const nameLength = data.readUInt32LE(offset)
+    offset += 4
+    const name = data.slice(offset, offset + nameLength).toString('utf-8').replace(/\0/g, '')
+    offset += nameLength
+    
+    // Symbol
+    const symbolLength = data.readUInt32LE(offset)
+    offset += 4
+    offset += symbolLength
+    
+    // URI
+    const uriLength = data.readUInt32LE(offset)
+    offset += 4
+    const uri = data.slice(offset, offset + uriLength).toString('utf-8').replace(/\0/g, '')
+    offset += uriLength
+    
+    // Seller fee
+    offset += 2
+    
+    // Creators
+    const hasCreators = data[offset]
+    offset += 1
+    if (hasCreators) {
+      const creatorCount = data.readUInt32LE(offset)
+      offset += 4
+      offset += creatorCount * 34
+    }
+    
+    // Primary sale + mutable
+    offset += 2
+    
+    // Edition nonce
+    const hasEditionNonce = data[offset]
+    offset += 1
+    if (hasEditionNonce) {
+      offset += 1
+    }
+    
+    // Token standard
+    const hasTokenStandard = data[offset]
+    offset += 1
+    if (hasTokenStandard) {
+      offset += 1
+    }
+    
+    // Collection
+    const hasCollection = data[offset]
+    offset += 1
+    let collection = null
+    
+    if (hasCollection) {
+      const verified = data[offset] === 1
+      offset += 1
+      const key = new PublicKey(data.slice(offset, offset + 32)).toString()
+      collection = { verified, key }
+    }
+    
+    return { name, uri, collection }
+  } catch (error) {
+    console.error('Error parsing metadata:', error)
+    return { name: '', uri: '', collection: null }
+  }
 }
